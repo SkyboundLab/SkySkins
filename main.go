@@ -33,7 +33,7 @@ var (
 func main() {
     err := godotenv.Load()
     if err != nil {
-        log.Fatal("Error loading .env file")
+        log.Println("Warning: no .env file loaded, relying on environment variables")
     }
 
     redisAddr := os.Getenv("REDIS_ADDR")
