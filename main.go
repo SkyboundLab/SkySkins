@@ -1,323 +1,281 @@
 package main
 
 import (
-    "context"
-    "encoding/base64"
-    "encoding/json"
-    "errors"
-    "fmt"
-    "io"
-    "log"
-    "net/http"
-    "os"
-    "path/filepath"
-    "regexp"
-    "strconv"
-    "strings"
-    "time"
 	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"image"
+	"image/draw"
 	"image/png"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
 
-    "github.com/joho/godotenv"
-    "github.com/redis/go-redis/v9"
-
-	mineatar "github.com/mineatar-io/skin-render"
+	"github.com/gorilla/mux"
+	"github.com/joho/godotenv"
+	"github.com/mineatar-io/skin-render"
+	"github.com/redis/go-redis/v9"
 )
 
+type Profile struct {
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	Properties []struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	} `json:"properties"`
+}
+
+type Skin struct {
+	Timestamp int64 `json:"timestamp"`
+	ProfileID string `json:"profileId"`
+	ProfileName string `json:"profileName"`
+	Textures struct {
+		Skin struct {
+			URL string `json:"url"`
+		} `json:"SKIN"`
+		Cape struct {
+			URL string `json:"url"`
+		} `json:"CAPE"`
+	}
+}
+
 var (
-    ctx         = context.Background()
-    redisClient *redis.Client
+    ctx = context.Background()
+    client *redis.Client
 )
 
 func main() {
-    err := godotenv.Load()
-    if err != nil {
-        log.Println("Warning: no .env file loaded, relying on environment variables")
-    }
+	godotenv.Load()
 
-    redisAddr := os.Getenv("REDIS_ADDR")
-    redisPassword := os.Getenv("REDIS_PASSWORD")
-    redisDB, err := strconv.Atoi(os.Getenv("REDIS_DB"))
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	address := os.Getenv("REDIS_ADDR")
+    password := os.Getenv("REDIS_PASSWORD")
+    database, err := strconv.Atoi(os.Getenv("REDIS_DB"))
     if err != nil {
         log.Fatalf("Invalid REDIS_DB value: %v", err)
+		os.Exit(1)
     }
 
-    redisClient = redis.NewClient(&redis.Options{
-        Addr:     redisAddr,
-        Password: redisPassword,
-        DB:       redisDB,
+    client = redis.NewClient(&redis.Options{
+        Addr: address,
+        Password: password,
+        DB: database,
     })
 
-    if err := redisClient.Ping(ctx).Err(); err != nil {
+    if err := client.Ping(ctx).Err(); err != nil {
         log.Fatalf("Failed to connect to Redis: %v", err)
+		os.Exit(1)
     }
 
+	router := mux.NewRouter()
 
-    http.HandleFunc("/r/ely/", handleRenderEly)
-    http.HandleFunc("/r/mojang/", handleRenderMojang)
-    http.HandleFunc("/r/all/", handleRenderAll)
+	router.HandleFunc("/m/{id}", m)
+	router.HandleFunc("/e/{name}", e)
+	router.HandleFunc("/a/{id}/{name}", a)
 
-    fmt.Println("API running at http://localhost:8080")
-    log.Fatal(http.ListenAndServe(":8080", nil))
+	http.Handle("/", router)
+
+	fmt.Printf("Listening on port %s", port)
+
+	http.ListenAndServe(":"+port, nil)
 }
 
-// --- ENDPOINT HANDLERS ---
+func m(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+    id := vars["id"]
 
-func handleRenderMojang(w http.ResponseWriter, r *http.Request) {
-	uuid := strings.TrimPrefix(r.URL.Path, "/r/mojang/")
-	uuid = normalizeUUID(uuid)
-	if uuid == "" {
+	id = strings.ReplaceAll(id, "-", "")
+
+	matched, _ := regexp.MatchString(`^[0-9a-fA-F]{32}$`, id)
+	if !matched {
 		http.Error(w, "Invalid UUID", http.StatusBadRequest)
 		return
 	}
-	handleRender(w, uuid, fetchSkinMojang)
-}
 
-func handleRenderEly(w http.ResponseWriter, r *http.Request) {
-	username := strings.TrimPrefix(r.URL.Path, "/r/ely/")
-	username = strings.TrimSpace(username)
-	if username == "" {
-		http.Error(w, "Username is required", http.StatusBadRequest)
-		return
-	}
-	handleRender(w, username, func(string) (string, func(), error) {
-		return fetchSkinEly(username)
-	})
-}
+	key := "skin-avatar:" + id
 
-func handleRenderAll(w http.ResponseWriter, r *http.Request) {
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/r/all/"), "/")
-	if len(parts) != 2 {
-		http.Error(w, "Expected format: /r/all/{uuid}/{username}", http.StatusBadRequest)
-		return
-	}
-	uuid := normalizeUUID(parts[0])
-	username := parts[1]
-	if uuid == "" || username == "" {
-		http.Error(w, "UUID and username are required", http.StatusBadRequest)
-		return
-	}
-
-	err := handleRenderWithFallback(w, uuid,
-		fetchSkinMojang,
-		func(string) (string, func(), error) {
-			return fetchSkinEly(username)
-		},
-	)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
-	}
-}
-
-// --- SHARED RENDERING LOGIC ---
-
-type fetchSkinFunc func(uuid string) (string, func(), error)
-
-func handleRender(w http.ResponseWriter, cacheKey string, fetchFunc fetchSkinFunc) {
-	cacheKey = "skin-face:" + cacheKey
-
-	cachedPNG, err := redisClient.Get(ctx, cacheKey).Bytes()
+	cached, err := client.Get(ctx, key).Bytes()
 	if err == nil {
 		w.Header().Set("Content-Type", "image/png")
-		w.Write(cachedPNG)
+		w.Write(cached)
 		return
 	}
 
-	skinPath, cleanup, err := fetchFunc(cacheKey)
-	if cleanup != nil {
-		defer cleanup()
-	}
+	response, err := http.Get(fmt.Sprintf("https://sessionserver.mojang.com/session/minecraft/profile/%s", id))
 	if err != nil {
-		http.Error(w, "Failed to fetch skin: "+err.Error(), http.StatusNotFound)
+		http.Error(w, "Failed to fetch profile", http.StatusInternalServerError)
+		return
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != 200 {
+		http.Error(w, "Profile not found", http.StatusNotFound)
 		return
 	}
 
-	faceImgBuf, err := RenderFace(skinPath)
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		http.Error(w, "Failed to read response body", http.StatusInternalServerError)
+		return
+	}
+
+	data := Profile{}
+
+	err = json.Unmarshal(body, &data)
+	if err != nil {
+		http.Error(w, "Failed to parse JSON", http.StatusInternalServerError)
+		return
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(data.Properties[0].Value)
+	if err != nil {
+		http.Error(w, "Failed to decode base64", http.StatusInternalServerError)
+		return
+	}
+
+	skin := Skin{}
+
+	err = json.Unmarshal(decoded, &skin)
+	if err != nil {
+		http.Error(w, "Failed to parse JSON", http.StatusInternalServerError)
+		return
+	}
+
+	if skin.Textures.Skin.URL != "" {
+		buf, err := render(skin.Textures.Skin.URL)
+		if err != nil {
+			http.Error(w, "Failed to render face: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		err = client.Set(ctx, key, buf.Bytes(), 48*time.Hour).Err()
+		if err != nil {
+			log.Printf("Warning: failed to cache image: %v", err)
+		}
+
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(buf.Bytes())
+	} else {
+		http.Error(w, "No skin URL found", http.StatusNotFound)
+		return
+	}
+}
+
+func e(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+    name := vars["name"]
+
+	key := "skin-avatar:" + name
+
+	cached, err := client.Get(ctx, key).Bytes()
+	if err == nil {
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(cached)
+		return
+	}
+
+	buf, err := render(fmt.Sprintf("http://skinsystem.ely.by/skins/%s.png", name))
 	if err != nil {
 		http.Error(w, "Failed to render face: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	err = redisClient.Set(ctx, cacheKey, faceImgBuf.Bytes(), 48*time.Hour).Err()
+	err = client.Set(ctx, key, buf.Bytes(), 48*time.Hour).Err()
 	if err != nil {
 		log.Printf("Warning: failed to cache image: %v", err)
 	}
 
 	w.Header().Set("Content-Type", "image/png")
-	w.Write(faceImgBuf.Bytes())
+	w.Write(buf.Bytes())
 }
 
-func handleRenderWithFallback(w http.ResponseWriter, uuid string, primary, fallback fetchSkinFunc) error {
-	skinPath, cleanup, err := primary(uuid)
-	if err == nil {
-		if cleanup != nil {
-			defer cleanup()
+func a(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id := vars["id"]
+	name := vars["name"]
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	response, err := http.Get(fmt.Sprintf("http://localhost:%s/m/%s", port, id))
+	if err != nil {
+		http.Error(w, "Failed to fetch target", http.StatusInternalServerError)
+		return
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != 200 {
+		response, err = http.Get(fmt.Sprintf("http://localhost:%s/e/%s", port, name))
+		if err != nil {
+			http.Error(w, "Failed to fetch target", http.StatusInternalServerError)
+			return
 		}
-		return writeAndCache(w, uuid, skinPath)
+		defer response.Body.Close()
+
+		if response.StatusCode != http.StatusOK {
+			http.Error(w, "Failed to fetch target", response.StatusCode)
+			return
+		}
 	}
 
-	skinPath, cleanup, err = fallback(uuid)
+	buffer, err := io.ReadAll(response.Body)
 	if err != nil {
-		return errors.New("skin not found on both Mojang and Ely")
-	}
-	if cleanup != nil {
-		defer cleanup()
-	}
-	return writeAndCache(w, uuid, skinPath)
-}
-
-func writeAndCache(w http.ResponseWriter, cacheKey, skinPath string) error {
-	faceImgBuf, err := RenderFace(skinPath)
-	if err != nil {
-		return err
-	}
-
-	err = redisClient.Set(ctx, "skin-face:"+cacheKey, faceImgBuf.Bytes(), 48*time.Hour).Err()
-	if err != nil {
-		log.Printf("Warning: failed to cache image: %v", err)
+		http.Error(w, "Failed to read response body", http.StatusInternalServerError)
+		return
 	}
 
 	w.Header().Set("Content-Type", "image/png")
-	w.Write(faceImgBuf.Bytes())
-	return nil
+	w.Write(buffer)
 }
 
-// --- FETCHERS ---
-
-func fetchSkinEly(username string) (string, func(), error) {
-	skinURL := fmt.Sprintf("http://skinsystem.ely.by/skins/%s.png", username)
-	return fetchSkinFromURL(skinURL, username)
-}
-
-func fetchSkinMojang(uuid string) (string, func(), error) {
-	skinURL, err := getMojangSkinURL(uuid)
+func render(url string) (*bytes.Buffer, error) {
+	response, err := http.Get(url)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
-	return fetchSkinFromURL(skinURL, uuid)
-}
+	defer response.Body.Close()
 
-func fetchSkinFromURL(url, key string) (string, func(), error) {
-	resp, err := http.Get(url)
-	if err != nil || resp.StatusCode != 200 {
-		if resp != nil {
-			resp.Body.Close()
-		}
-		return "", nil, fmt.Errorf("failed to fetch skin from %s", url)
+	if response.StatusCode != 200 {
+		return nil, fmt.Errorf("skin not found")
 	}
-	defer resp.Body.Close()
 
-	tempDir := os.TempDir()
-	skinPath := filepath.Join(tempDir, fmt.Sprintf("skin-%s.png", key))
-	outFile, err := os.Create(skinPath)
+	buffer, err := io.ReadAll(response.Body)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to create file: %w", err)
+		return nil, err
 	}
-	_, err = io.Copy(outFile, resp.Body)
-	outFile.Close()
+
+	source, err := png.Decode(bytes.NewReader(buffer))
 	if err != nil {
-		os.Remove(skinPath)
-		return "", nil, fmt.Errorf("failed to write skin: %w", err)
+		return nil, err
 	}
 
-	cleanup := func() {
-		os.Remove(skinPath)
-	}
-	return skinPath, cleanup, nil
-}
+	bounds := source.Bounds()
+	img := image.NewNRGBA(bounds)
+	draw.Draw(img, bounds, source, bounds.Min, draw.Src)
 
-// --- MOJANG SESSION SERVER PARSE ---
-
-func getMojangSkinURL(uuid string) (string, error) {
-	url := fmt.Sprintf("https://sessionserver.mojang.com/session/minecraft/profile/%s", uuid)
-	resp, err := http.Get(url)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("profile not found")
-	}
-
-	var data struct {
-		Properties []struct {
-			Name  string `json:"name"`
-			Value string `json:"value"`
-		} `json:"properties"`
-	}
-
-	dec := json.NewDecoder(resp.Body)
-	if err := dec.Decode(&data); err != nil {
-		return "", err
-	}
-
-	for _, prop := range data.Properties {
-		if prop.Name == "textures" {
-			decoded, err := base64.StdEncoding.DecodeString(prop.Value)
-			if err != nil {
-				return "", err
-			}
-			var texData struct {
-				Textures struct {
-					Skin struct {
-						URL string `json:"url"`
-					} `json:"SKIN"`
-				} `json:"textures"`
-			}
-			if err := json.Unmarshal(decoded, &texData); err != nil {
-				return "", err
-			}
-			if texData.Textures.Skin.URL != "" {
-				return texData.Textures.Skin.URL, nil
-			}
-		}
-	}
-
-	return "", errors.New("skin URL not found")
-}
-
-// --- UTILITIES ---
-
-func normalizeUUID(s string) string {
-	cleaned := strings.ReplaceAll(s, "-", "")
-	matched, _ := regexp.MatchString(`^[0-9a-fA-F]{32}$`, cleaned)
-	if !matched {
-		return ""
-	}
-	return strings.ToLower(cleaned)
-}
-
-func RenderFace(skinPath string) (*bytes.Buffer, error) {
-    f, err := os.Open(skinPath)
-    if err != nil {
-        return nil, err
-    }
-    defer f.Close()
-
-    img, err := png.Decode(f)
-    if err != nil {
-        return nil, err
-    }
-
-    nrgbaImg := image.NewNRGBA(img.Bounds())
-    for y := img.Bounds().Min.Y; y < img.Bounds().Max.Y; y++ {
-        for x := img.Bounds().Min.X; x < img.Bounds().Max.X; x++ {
-            nrgbaImg.Set(x, y, img.At(x, y))
-        }
-    }
-
-    face := mineatar.RenderFace(nrgbaImg, mineatar.Options{
+	avatar := skin.RenderFace(img, skin.Options{
 		Overlay: true,
-        Scale: 96,
-    })
+		Scale: 96,
+	})
 
-    var buf bytes.Buffer
-    err = png.Encode(&buf, face)
-    if err != nil {
-        return nil, err
-    }
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, avatar); err != nil {
+		return nil, fmt.Errorf("failed to encode image to PNG: %w", err)
+	}
 
-    return &buf, nil
+	return &buf, nil
 }
