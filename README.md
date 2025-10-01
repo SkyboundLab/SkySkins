@@ -1,6 +1,6 @@
 ## SkySkins
 
-A simple API for rendering avatars from Mojang and Ely.
+A simple API for rendering avatars from Drasl, Mojang and Ely.
 
 ### Routes
 
