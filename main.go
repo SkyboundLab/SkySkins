@@ -22,6 +22,10 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/mineatar-io/skin-render"
 	"github.com/redis/go-redis/v9"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 type MojangProfile struct {
@@ -65,10 +69,16 @@ type DraslConfig struct {
 	URL   string
 }
 
+type ElyUser struct {
+    Name        string `json:"name"`
+    ChangedToAt *int64 `json:"changedToAt,omitempty"`
+}
+
 var (
     ctx = context.Background()
-    client *redis.Client
-	Drasl DraslConfig
+    redisClient *redis.Client
+	mongoClient *mongo.Client
+	draslConfig DraslConfig
 	port string
 )
 
@@ -80,7 +90,7 @@ func main() {
 		port = "8080"
 	}
 
-	Drasl = DraslConfig{
+	draslConfig = DraslConfig{
 		Token: os.Getenv("DRASL_TOKEN"),
 		URL:   os.Getenv("DRASL_URL"),
 	}
@@ -93,23 +103,42 @@ func main() {
 		os.Exit(1)
     }
 
-    client = redis.NewClient(&redis.Options{
+    redisClient = redis.NewClient(&redis.Options{
         Addr: address,
         Password: password,
         DB: database,
     })
 
-    if err := client.Ping(ctx).Err(); err != nil {
+    if err := redisClient.Ping(ctx).Err(); err != nil {
         log.Fatalf("Failed to connect to Redis: %v", err)
 		os.Exit(1)
     }
+
+	uri := os.Getenv("MONGODB_URI")
+	if uri == "" {
+		log.Fatal("MONGODB_URI not set")
+		os.Exit(1)
+	}
+
+	mongoClient, err = mongo.Connect(options.Client().ApplyURI(uri))
+	if err != nil {
+		log.Fatalf("Failed to connect to MongoDB: %v", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := mongoClient.Disconnect(context.TODO()); err != nil {
+			panic(err)
+		}
+	}()
 
 	router := mux.NewRouter()
 
 	router.HandleFunc("/d/{id}", drasl)
 	router.HandleFunc("/m/{id}", mojang)
-	router.HandleFunc("/e/{name}", ely)
-	router.HandleFunc("/a/{id}/{name}", all)
+	router.HandleFunc("/e/{id}", ely)
+	router.HandleFunc("/a/{id}", all)
+
+	router.HandleFunc("/textures/signed/{id}", textures)
 
 	http.Handle("/", router)
 
@@ -130,9 +159,9 @@ func mojang(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := "skin-avatar:" + id
+	key := "skin:avatar:" + id
 
-	cached, err := client.Get(ctx, key).Bytes()
+	cached, err := redisClient.Get(ctx, key).Bytes()
 	if err == nil {
 		w.Header().Set("Content-Type", "image/png")
 		w.Write(cached)
@@ -186,7 +215,7 @@ func mojang(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		err = client.Set(ctx, key, buf.Bytes(), 48*time.Hour).Err()
+		err = redisClient.Set(ctx, key, buf.Bytes(), 48*time.Hour).Err()
 		if err != nil {
 			log.Printf("Warning: failed to cache image: %v", err)
 		}
@@ -219,22 +248,22 @@ func drasl(w http.ResponseWriter, r *http.Request) {
 		id[20:32],
 	)
 
-	key := "skin-avatar:" + id
+	key := "skin:avatar:" + id
 
-	cached, err := client.Get(ctx, key).Bytes()
+	cached, err := redisClient.Get(ctx, key).Bytes()
 	if err == nil {
 		w.Header().Set("Content-Type", "image/png")
 		w.Write(cached)
 		return
 	}
 
-	req, err := http.NewRequest("GET", fmt.Sprintf("%s/drasl/api/v2/players/%s", Drasl.URL, id), nil)
+	req, err := http.NewRequest("GET", fmt.Sprintf("%s/drasl/api/v2/players/%s", draslConfig.URL, id), nil)
 	if err != nil {
 		http.Error(w, "Failed to create request", http.StatusInternalServerError)
 		return
 	}
 
-	req.Header.Set("Authorization", "Bearer "+Drasl.Token)
+	req.Header.Set("Authorization", "Bearer "+draslConfig.Token)
 
 	response, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -268,7 +297,7 @@ func drasl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = client.Set(ctx, key, buf.Bytes(), 48*time.Hour).Err()
+	err = redisClient.Set(ctx, key, buf.Bytes(), 48*time.Hour).Err()
 	if err != nil {
 		log.Printf("Warning: failed to cache image: %v", err)
 	}
@@ -279,24 +308,60 @@ func drasl(w http.ResponseWriter, r *http.Request) {
 
 func ely(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-    name := vars["name"]
+    id := vars["id"]
 
-	key := "skin-avatar:" + name
+	id = strings.ReplaceAll(id, "-", "")
 
-	cached, err := client.Get(ctx, key).Bytes()
+	matched, _ := regexp.MatchString(`^[0-9a-fA-F]{32}$`, id)
+	if !matched {
+		http.Error(w, "Invalid UUID", http.StatusBadRequest)
+		return
+	}
+
+	key := "skin:avatar:" + id
+
+	cached, err := redisClient.Get(ctx, key).Bytes()
 	if err == nil {
 		w.Header().Set("Content-Type", "image/png")
 		w.Write(cached)
 		return
 	}
 
-	buf, err := render(fmt.Sprintf("http://skinsystem.ely.by/skins/%s.png", name))
+	response, err := http.Get(fmt.Sprintf("https://authserver.ely.by/api/user/profiles/%s/names", id))
+	if err != nil {
+		http.Error(w, "Failed to fetch profile", http.StatusInternalServerError)
+		return
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != 200 {
+		http.Error(w, "Profile not found", http.StatusNotFound)
+		return
+	}
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		http.Error(w, "Failed to read response body", http.StatusInternalServerError)
+		return
+	}
+
+	var usernames []ElyUser
+
+	err = json.Unmarshal([]byte(body), &usernames)
+	if err != nil {
+		http.Error(w, "Failed to parse JSON", http.StatusInternalServerError)
+		return
+	}
+
+	username := usernames[len(usernames) - 1].Name
+
+	buf, err := render(fmt.Sprintf("http://skinsystem.ely.by/skins/%s.png", username))
 	if err != nil {
 		http.Error(w, "Failed to render face: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	err = client.Set(ctx, key, buf.Bytes(), 48*time.Hour).Err()
+	err = redisClient.Set(ctx, key, buf.Bytes(), 48*time.Hour).Err()
 	if err != nil {
 		log.Printf("Warning: failed to cache image: %v", err)
 	}
@@ -308,12 +373,11 @@ func ely(w http.ResponseWriter, r *http.Request) {
 func all(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id := vars["id"]
-	name := vars["name"]
 
 	endpoints := []string{
 		fmt.Sprintf("http://localhost:%s/d/%s", port, id),
 		fmt.Sprintf("http://localhost:%s/m/%s", port, id),
-		fmt.Sprintf("http://localhost:%s/e/%s", port, name),
+		fmt.Sprintf("http://localhost:%s/e/%s", port, id),
 	}
 
 	var resp *http.Response
@@ -385,4 +449,110 @@ func render(url string) (*bytes.Buffer, error) {
 	}
 
 	return &buf, nil
+}
+
+func textures(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id := vars["id"]
+
+	id = strings.ReplaceAll(id, "-", "")
+
+	matched, _ := regexp.MatchString(`^[0-9a-fA-F]{32}$`, id)
+	if !matched {
+		http.Error(w, "Invalid UUID", http.StatusBadRequest)
+		return
+	}
+
+	key := "skin:data:" + id
+
+	cached, err := redisClient.Get(ctx, key).Bytes()
+	if err == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(cached)
+		return
+	}
+
+	var result struct {
+		ID         string `bson:"id"`
+		Name       string `bson:"name"`
+		Properties []struct {
+			Name  string `bson:"name"`
+			Value string `bson:"value"`
+		} `bson:"properties"`
+	}
+	collection := mongoClient.Database("SkySkins").Collection("drasl")
+
+	var body []byte
+	err = collection.FindOne(ctx, bson.M{"id": id}).Decode(&result)
+
+	if err == nil {
+		body, err = json.Marshal(result)
+		if err != nil {
+			http.Error(w, "Failed to encode JSON", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		response, err := http.Get(fmt.Sprintf("https://sessionserver.mojang.com/session/minecraft/profile/%s", id))
+		if err != nil {
+			http.Error(w, "Failed to fetch profile", http.StatusInternalServerError)
+			return
+		}
+		defer response.Body.Close()
+
+		if response.StatusCode != 200 {
+			response, err = http.Get(fmt.Sprintf("https://authserver.ely.by/api/user/profiles/%s/names", id))
+			if err != nil {
+				http.Error(w, "Failed to fetch profile", http.StatusInternalServerError)
+				return
+			}
+			defer response.Body.Close()
+
+			if response.StatusCode != 200 {
+				http.Error(w, "Profile not found", http.StatusNotFound)
+				return
+			}
+
+			body, err = io.ReadAll(response.Body)
+			if err != nil {
+				http.Error(w, "Failed to read response body", http.StatusInternalServerError)
+				return
+			}
+
+			var usernames []ElyUser
+
+			err = json.Unmarshal([]byte(body), &usernames)
+			if err != nil {
+				http.Error(w, "Failed to parse JSON", http.StatusInternalServerError)
+				return
+			}
+
+			username := usernames[len(usernames) - 1].Name
+
+			response, err = http.Get(fmt.Sprintf("http://skinsystem.ely.by/textures/signed/%s", username))
+			if err != nil {
+				http.Error(w, "Failed to fetch profile", http.StatusInternalServerError)
+				return
+			}
+			defer response.Body.Close()
+
+			if response.StatusCode != 200 {
+				http.Error(w, "Profile not found", http.StatusNotFound)
+				return
+			}
+		}
+
+		body, err = io.ReadAll(response.Body)
+		if err != nil {
+			http.Error(w, "Failed to read response body", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	err = redisClient.Set(ctx, key, body, 48*time.Hour).Err()
+	if err != nil {
+		log.Printf("Warning: failed to cache skin data for %s: %v", id, err)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(body)
 }
