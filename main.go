@@ -24,7 +24,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-type Profile struct {
+type MojangProfile struct {
 	ID      string   `json:"id"`
 	Name    string   `json:"name"`
 	Properties []struct {
@@ -33,7 +33,7 @@ type Profile struct {
 	} `json:"properties"`
 }
 
-type Skin struct {
+type MojangSkin struct {
 	Timestamp int64 `json:"timestamp"`
 	ProfileID string `json:"profileId"`
 	ProfileName string `json:"profileName"`
@@ -47,17 +47,42 @@ type Skin struct {
 	}
 }
 
+type DraslProfile struct {
+	CapeURL           string `json:"capeUrl"`
+	CreatedAt         string `json:"createdAt"`
+	FallbackPlayer    string `json:"fallbackPlayer"`
+	Name              string `json:"name"`
+	NameLastChangedAt string `json:"nameLastChangedAt"`
+	OfflineUUID       string `json:"offlineUuid"`
+	SkinModel         string `json:"skinModel"`
+	SkinURL           string `json:"skinUrl"`
+	UserUUID          string `json:"userUuid"`
+	UUID              string `json:"uuid"`
+}
+
+type DraslConfig struct {
+	Token string
+	URL   string
+}
+
 var (
     ctx = context.Background()
     client *redis.Client
+	Drasl DraslConfig
+	port string
 )
 
 func main() {
 	godotenv.Load()
 
-	port := os.Getenv("PORT")
+	port = os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
+	}
+
+	Drasl = DraslConfig{
+		Token: os.Getenv("DRASL_TOKEN"),
+		URL:   os.Getenv("DRASL_URL"),
 	}
 
 	address := os.Getenv("REDIS_ADDR")
@@ -81,9 +106,10 @@ func main() {
 
 	router := mux.NewRouter()
 
-	router.HandleFunc("/m/{id}", m)
-	router.HandleFunc("/e/{name}", e)
-	router.HandleFunc("/a/{id}/{name}", a)
+	router.HandleFunc("/d/{id}", drasl)
+	router.HandleFunc("/m/{id}", mojang)
+	router.HandleFunc("/e/{name}", ely)
+	router.HandleFunc("/a/{id}/{name}", all)
 
 	http.Handle("/", router)
 
@@ -92,7 +118,7 @@ func main() {
 	http.ListenAndServe(":"+port, nil)
 }
 
-func m(w http.ResponseWriter, r *http.Request) {
+func mojang(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
     id := vars["id"]
 
@@ -131,7 +157,7 @@ func m(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data := Profile{}
+	data := MojangProfile{}
 
 	err = json.Unmarshal(body, &data)
 	if err != nil {
@@ -145,7 +171,7 @@ func m(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	skin := Skin{}
+	skin := MojangSkin{}
 
 	err = json.Unmarshal(decoded, &skin)
 	if err != nil {
@@ -173,7 +199,85 @@ func m(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func e(w http.ResponseWriter, r *http.Request) {
+func drasl(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+    id := vars["id"]
+
+	id = strings.ReplaceAll(id, "-", "")
+
+	matched, _ := regexp.MatchString(`^[0-9a-fA-F]{32}$`, id)
+	if !matched {
+		http.Error(w, "Invalid UUID", http.StatusBadRequest)
+		return
+	}
+
+	id = fmt.Sprintf("%s-%s-%s-%s-%s",
+		id[0:8],
+		id[8:12],
+		id[12:16],
+		id[16:20],
+		id[20:32],
+	)
+
+	key := "skin-avatar:" + id
+
+	cached, err := client.Get(ctx, key).Bytes()
+	if err == nil {
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(cached)
+		return
+	}
+
+	req, err := http.NewRequest("GET", fmt.Sprintf("%s/drasl/api/v2/players/%s", Drasl.URL, id), nil)
+	if err != nil {
+		http.Error(w, "Failed to create request", http.StatusInternalServerError)
+		return
+	}
+
+	req.Header.Set("Authorization", "Bearer "+Drasl.Token)
+
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(w, "Failed to fetch profile", http.StatusInternalServerError)
+		return
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != 200 {
+		http.Error(w, "Profile not found", http.StatusNotFound)
+		return
+	}
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		http.Error(w, "Failed to read response body", http.StatusInternalServerError)
+		return
+	}
+
+	profile := DraslProfile{}
+
+	err = json.Unmarshal(body, &profile)
+	if err != nil {
+		http.Error(w, "Failed to parse JSON", http.StatusInternalServerError)
+		return
+	}
+
+	buf, err := render(profile.SkinURL)
+	if err != nil {
+		http.Error(w, "Failed to render face: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	err = client.Set(ctx, key, buf.Bytes(), 48*time.Hour).Err()
+	if err != nil {
+		log.Printf("Warning: failed to cache image: %v", err)
+	}
+
+	w.Header().Set("Content-Type", "image/png")
+	w.Write(buf.Bytes())
+}
+
+func ely(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
     name := vars["name"]
 
@@ -201,38 +305,41 @@ func e(w http.ResponseWriter, r *http.Request) {
 	w.Write(buf.Bytes())
 }
 
-func a(w http.ResponseWriter, r *http.Request) {
+func all(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id := vars["id"]
 	name := vars["name"]
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	endpoints := []string{
+		fmt.Sprintf("http://localhost:%s/d/%s", port, id),
+		fmt.Sprintf("http://localhost:%s/m/%s", port, id),
+		fmt.Sprintf("http://localhost:%s/e/%s", port, name),
 	}
 
-	response, err := http.Get(fmt.Sprintf("http://localhost:%s/m/%s", port, id))
-	if err != nil {
-		http.Error(w, "Failed to fetch target", http.StatusInternalServerError)
+	var resp *http.Response
+	var err error
+
+	for _, url := range endpoints {
+		resp, err = http.Get(url)
+		if err != nil {
+			continue
+		}
+
+		if resp.StatusCode == http.StatusOK {
+			defer resp.Body.Close()
+			break
+		}
+
+		resp.Body.Close()
+		resp = nil
+	}
+
+	if resp == nil {
+		http.Error(w, "Failed to fetch target", http.StatusBadGateway)
 		return
 	}
-	defer response.Body.Close()
 
-	if response.StatusCode != 200 {
-		response, err = http.Get(fmt.Sprintf("http://localhost:%s/e/%s", port, name))
-		if err != nil {
-			http.Error(w, "Failed to fetch target", http.StatusInternalServerError)
-			return
-		}
-		defer response.Body.Close()
-
-		if response.StatusCode != http.StatusOK {
-			http.Error(w, "Failed to fetch target", response.StatusCode)
-			return
-		}
-	}
-
-	buffer, err := io.ReadAll(response.Body)
+	buffer, err := io.ReadAll(resp.Body)
 	if err != nil {
 		http.Error(w, "Failed to read response body", http.StatusInternalServerError)
 		return
