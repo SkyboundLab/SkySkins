@@ -26,3 +26,5 @@ The API caches avatars for 48 hours.
 
 - `DRASL_TOKEN` - Drasl authentication token
 - `DRASL_URL` - Drasl API URL
+
+- `MINESKIN_TOKEN` - MineSkin authentication token

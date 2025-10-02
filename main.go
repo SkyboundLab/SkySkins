@@ -20,6 +20,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
+	"github.com/robfig/cron/v3"
 	"github.com/mineatar-io/skin-render"
 	"github.com/redis/go-redis/v9"
 
@@ -64,6 +65,31 @@ type DraslProfile struct {
 	UUID              string `json:"uuid"`
 }
 
+type DraslUser struct {
+	CapeURL           string `json:"capeUrl"`
+	CreatedAt         string `json:"createdAt"`
+	FallbackPlayer    string `json:"fallbackPlayer"`
+	Name              string `json:"name"`
+	NameLastChangedAt string `json:"nameLastChangedAt"`
+	OfflineUUID       string `json:"offlineUuid"`
+	SkinModel         string `json:"skinModel"`
+	SkinURL           string `json:"skinUrl"`
+	UserUUID          string `json:"userUuid"`
+	UUID              string `json:"uuid"`
+}
+
+type DraslSkin struct {
+	ID         string `bson:"id"`
+	Name       string `bson:"name"`
+	URL        string `bson:"url"`
+	Properties []struct {
+		Name      string `bson:"name"`
+		Signature string `bson:"signature"`
+		Value     string `bson:"value"`
+	} `bson:"properties"`
+}
+
+
 type DraslConfig struct {
 	Token string
 	URL   string
@@ -74,11 +100,23 @@ type ElyUser struct {
     ChangedToAt *int64 `json:"changedToAt,omitempty"`
 }
 
+type MineSkin struct {
+	Skin struct {
+		Texture struct {
+			Data struct {
+				Value     string `json:"value"`
+				Signature string `json:"signature"`
+			} `json:"data"`
+		} `json:"texture"`
+	} `json:"skin"`
+}
+
 var (
     ctx = context.Background()
     redisClient *redis.Client
 	mongoClient *mongo.Client
 	draslConfig DraslConfig
+	mineskin string
 	port string
 )
 
@@ -94,6 +132,8 @@ func main() {
 		Token: os.Getenv("DRASL_TOKEN"),
 		URL:   os.Getenv("DRASL_URL"),
 	}
+
+	mineskin = os.Getenv("MINESKIN_TOKEN")
 
 	address := os.Getenv("REDIS_ADDR")
     password := os.Getenv("REDIS_PASSWORD")
@@ -143,6 +183,12 @@ func main() {
 	http.Handle("/", router)
 
 	fmt.Printf("Listening on port %s", port)
+
+	c := cron.New()
+
+	c.AddFunc("@daily", updateSkins)
+
+	c.Start()
 
 	http.ListenAndServe(":"+port, nil)
 }
@@ -257,15 +303,15 @@ func drasl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req, err := http.NewRequest("GET", fmt.Sprintf("%s/drasl/api/v2/players/%s", draslConfig.URL, id), nil)
+	request, err := http.NewRequest("GET", fmt.Sprintf("%s/drasl/api/v2/players/%s", draslConfig.URL, id), nil)
 	if err != nil {
 		http.Error(w, "Failed to create request", http.StatusInternalServerError)
 		return
 	}
 
-	req.Header.Set("Authorization", "Bearer "+draslConfig.Token)
+	request.Header.Set("Authorization", "Bearer "+draslConfig.Token)
 
-	response, err := http.DefaultClient.Do(req)
+	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		http.Error(w, "Failed to fetch profile", http.StatusInternalServerError)
 		return
@@ -472,14 +518,7 @@ func textures(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var result struct {
-		ID         string `bson:"id"`
-		Name       string `bson:"name"`
-		Properties []struct {
-			Name  string `bson:"name"`
-			Value string `bson:"value"`
-		} `bson:"properties"`
-	}
+	var result DraslSkin
 	collection := mongoClient.Database("SkySkins").Collection("drasl")
 
 	var body []byte
@@ -555,4 +594,141 @@ func textures(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(body)
+}
+
+func updateSkins() {
+	request, err := http.NewRequest("GET", fmt.Sprintf("%s/drasl/api/v2/players", draslConfig.URL), nil)
+	if err != nil {
+		log.Printf("Warning: failed to create request: %v", err)
+		return
+	}
+
+	request.Header.Set("Authorization", "Bearer "+draslConfig.Token)
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		log.Printf("Warning: failed to fetch profile: %v", err)
+		return
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != 200 {
+		log.Printf("Warning: failed to fetch profile: %v", err)
+		return
+	}
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		log.Printf("Warning: failed to read response body: %v", err)
+		return
+	}
+
+	var users []DraslUser
+
+	err = json.Unmarshal([]byte(body), &users)
+	if err != nil {
+		log.Printf("Warning: failed to parse JSON: %v", err)
+		return
+	}
+
+	collection := mongoClient.Database("SkySkins").Collection("drasl")
+
+	for _, user := range users {
+		log.Printf("Checking %s", user.Name)
+
+		id := strings.ReplaceAll(user.UUID, "-", "")
+
+		var result DraslSkin
+
+		err = collection.FindOne(ctx, bson.M{"id": id}).Decode(&result)
+		if err != nil && err != mongo.ErrNoDocuments {
+			log.Printf("Warning: DB find error for %s: %v", user.Name, err)
+			continue
+		}
+
+		if err == nil && result.URL == user.SkinURL {
+			log.Printf("Skipping %s - URL unchanged", user.Name)
+			continue
+		}
+
+		value, signature, skinError := uploadSkin(user)
+		if skinError != nil || value == "" || signature == "" {
+			log.Printf("Warning: failed to upload skin for %s: %v", user.Name, err)
+			continue
+		}
+
+		doc := bson.M{
+			"id":   id,
+			"name": user.Name,
+			"url":  user.SkinURL,
+			"properties": []bson.M{
+				{
+					"name":      "textures",
+					"value":     value,
+					"signature": signature,
+				},
+				{
+					"name":  "drasl",
+					"value": "we do not want to be drasl!",
+				},
+			},
+		}
+
+		if err == mongo.ErrNoDocuments {
+			log.Printf("Inserting %s in DB: %v", user.Name, doc)
+			_, err = collection.InsertOne(ctx, doc)
+		} else {
+			log.Printf("Updating %s in DB: %v", user.Name, doc)
+			_, err = collection.UpdateOne(ctx, bson.M{"id": id}, bson.M{"$set": doc})
+		}
+
+		if err != nil {
+			log.Printf("Warning: failed to insert/update DB for %s: %v", user.Name, err)
+		}
+	}
+}
+
+func uploadSkin(user DraslUser) (value, signature string, err error) {
+	payload := map[string]string{
+		"variant":    user.SkinModel,
+		"name":       user.Name,
+		"visibility": "public",
+		"url":        user.SkinURL,
+	}
+
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", "", err
+	}
+
+	request, err := http.NewRequest("POST", "https://api.mineskin.org/v2/generate", bytes.NewBuffer(bodyBytes))
+	if err != nil {
+		return "", "", err
+	}
+
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Authorization", "Bearer "+mineskin)
+
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return "", "", err
+	}
+	defer response.Body.Close()
+
+	log.Printf("Uploading %s", user.Name)
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return "", "", err
+	}
+
+	log.Printf("Response: %s", string(body))
+
+	var skin MineSkin
+	if err := json.Unmarshal(body, &skin); err != nil {
+		return "", "", err
+	}
+
+	return skin.Skin.Texture.Data.Value, skin.Skin.Texture.Data.Signature, nil
 }
