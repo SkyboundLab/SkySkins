@@ -79,13 +79,13 @@ type DraslUser struct {
 }
 
 type DraslSkin struct {
-	ID         string `bson:"id"`
-	Name       string `bson:"name"`
-	URL        string `bson:"url"`
-	Properties []struct {
-		Name      string `bson:"name"`
-		Signature string `bson:"signature"`
-		Value     string `bson:"value"`
+	id         string `bson:"id"`
+	name       string `bson:"name"`
+	url        string `bson:"url"`
+	properties []struct {
+		name      string `bson:"name"`
+		signature string `bson:"signature,omitempty"`
+		value     string `bson:"value"`
 	} `bson:"properties"`
 }
 
@@ -646,7 +646,7 @@ func updateSkins() {
 			continue
 		}
 
-		if err == nil && result.URL == user.SkinURL {
+		if err == nil && result.url == user.SkinURL {
 			log.Printf("Skipping %s - URL unchanged", user.Name)
 			continue
 		}
