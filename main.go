@@ -20,9 +20,9 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
-	"github.com/robfig/cron/v3"
 	"github.com/mineatar-io/skin-render"
 	"github.com/redis/go-redis/v9"
+	"github.com/robfig/cron/v3"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -530,15 +530,15 @@ func textures(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		response, err := http.Get(fmt.Sprintf("https://sessionserver.mojang.com/session/minecraft/profile/%s", id))
-		if err != nil {
-			http.Error(w, "Failed to fetch profile", http.StatusInternalServerError)
-			return
-		}
-		defer response.Body.Close()
+		// response, err := http.Get(fmt.Sprintf("https://sessionserver.mojang.com/session/minecraft/profile/%s", id))
+		// if err != nil {
+		// 	http.Error(w, "Failed to fetch profile", http.StatusInternalServerError)
+		// 	return
+		// }
+		// defer response.Body.Close()
 
-		if response.StatusCode != 200 {
-			response, err = http.Get(fmt.Sprintf("https://authserver.ely.by/api/user/profiles/%s/names", id))
+		// if response.StatusCode != 200 {
+			response, err := http.Get(fmt.Sprintf("https://authserver.ely.by/api/user/profiles/%s/names", id))
 			if err != nil {
 				http.Error(w, "Failed to fetch profile", http.StatusInternalServerError)
 				return
@@ -577,7 +577,7 @@ func textures(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "Profile not found", http.StatusNotFound)
 				return
 			}
-		}
+		// }
 
 		body, err = io.ReadAll(response.Body)
 		if err != nil {
