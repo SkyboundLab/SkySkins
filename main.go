@@ -544,16 +544,15 @@ func textures(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		// response, err := http.Get(fmt.Sprintf("https://sessionserver.mojang.com/session/minecraft/profile/%s", id))
-		// if err != nil {
-		// 	close(w)
-		// 	return
-		// }
-		// defer response.Body.Close()
+		response, err := http.Get(fmt.Sprintf("https://sessionserver.mojang.com/session/minecraft/profile/%s", id))
+		if err != nil {
+			close(w)
+			return
+		}
+		defer response.Body.Close()
 
-		// if response.StatusCode != 200 {
-			// response, err = http.Get(fmt.Sprintf("https://authserver.ely.by/api/user/profiles/%s/names", id))
-			response, err := http.Get(fmt.Sprintf("https://authserver.ely.by/api/user/profiles/%s/names", id))
+		if response.StatusCode != 200 {
+			response, err = http.Get(fmt.Sprintf("https://authserver.ely.by/api/user/profiles/%s/names", id))
 			if err != nil {
 				close(w)
 				return
@@ -592,7 +591,7 @@ func textures(w http.ResponseWriter, r *http.Request) {
 				close(w)
 				return
 			}
-		// }
+		}
 
 		body, err = io.ReadAll(response.Body)
 		if err != nil {
