@@ -496,6 +496,20 @@ func render(url string) (*bytes.Buffer, error) {
 	return &buf, nil
 }
 
+func close(w http.ResponseWriter) {
+    w.WriteHeader(http.StatusNoContent) // 204
+    if hj, ok := w.(http.Hijacker); ok {
+        conn, _, err := hj.Hijack()
+        if err == nil {
+            conn.Close()
+            return
+        }
+    }
+    if fl, ok := w.(http.Flusher); ok {
+        fl.Flush()
+    }
+}
+
 func textures(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id := vars["id"]
@@ -504,7 +518,7 @@ func textures(w http.ResponseWriter, r *http.Request) {
 
 	matched, _ := regexp.MatchString(`^[0-9a-fA-F]{32}$`, id)
 	if !matched {
-		http.Error(w, "Invalid UUID", http.StatusBadRequest)
+		close(w)
 		return
 	}
 
@@ -526,33 +540,34 @@ func textures(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		body, err = json.Marshal(result)
 		if err != nil {
-			http.Error(w, "Failed to encode JSON", http.StatusInternalServerError)
+			close(w)
 			return
 		}
 	} else {
 		// response, err := http.Get(fmt.Sprintf("https://sessionserver.mojang.com/session/minecraft/profile/%s", id))
 		// if err != nil {
-		// 	http.Error(w, "Failed to fetch profile", http.StatusInternalServerError)
+		// 	close(w)
 		// 	return
 		// }
 		// defer response.Body.Close()
 
 		// if response.StatusCode != 200 {
+			// response, err = http.Get(fmt.Sprintf("https://authserver.ely.by/api/user/profiles/%s/names", id))
 			response, err := http.Get(fmt.Sprintf("https://authserver.ely.by/api/user/profiles/%s/names", id))
 			if err != nil {
-				http.Error(w, "Failed to fetch profile", http.StatusInternalServerError)
+				close(w)
 				return
 			}
 			defer response.Body.Close()
 
 			if response.StatusCode != 200 {
-				http.Error(w, "Profile not found", http.StatusNotFound)
+				close(w)
 				return
 			}
 
 			body, err = io.ReadAll(response.Body)
 			if err != nil {
-				http.Error(w, "Failed to read response body", http.StatusInternalServerError)
+				close(w)
 				return
 			}
 
@@ -560,7 +575,7 @@ func textures(w http.ResponseWriter, r *http.Request) {
 
 			err = json.Unmarshal([]byte(body), &usernames)
 			if err != nil {
-				http.Error(w, "Failed to parse JSON", http.StatusInternalServerError)
+				close(w)
 				return
 			}
 
@@ -568,20 +583,20 @@ func textures(w http.ResponseWriter, r *http.Request) {
 
 			response, err = http.Get(fmt.Sprintf("http://skinsystem.ely.by/textures/signed/%s", username))
 			if err != nil {
-				http.Error(w, "Failed to fetch profile", http.StatusInternalServerError)
+				close(w)
 				return
 			}
 			defer response.Body.Close()
 
 			if response.StatusCode != 200 {
-				http.Error(w, "Profile not found", http.StatusNotFound)
+				close(w)
 				return
 			}
 		// }
 
 		body, err = io.ReadAll(response.Body)
 		if err != nil {
-			http.Error(w, "Failed to read response body", http.StatusInternalServerError)
+			close(w)
 			return
 		}
 	}
