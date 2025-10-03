@@ -544,7 +544,7 @@ func textures(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		response, err := http.Get(fmt.Sprintf("https://sessionserver.mojang.com/session/minecraft/profile/%s", id))
+		response, err := http.Get(fmt.Sprintf("https://sessionserver.mojang.com/session/minecraft/profile/%s?unsigned=false", id))
 		if err != nil {
 			close(w)
 			return
