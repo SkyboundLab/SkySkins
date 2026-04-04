@@ -666,7 +666,7 @@ func updateSkins() {
 
 		value, signature, skinError := uploadSkin(user)
 		if skinError != nil || value == "" || signature == "" {
-			log.Printf("Warning: failed to upload skin for %s: %v", user.Name, err)
+			log.Printf("Warning: failed to upload skin for %s: %v", user.Name, skinError)
 			continue
 		}
 
