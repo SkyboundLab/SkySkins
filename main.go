@@ -440,10 +440,16 @@ func all(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id := vars["id"]
 
+	size := r.URL.Query().Get("size")
+	query := ""
+	if size != "" {
+		query = "?size=" + size
+	}
+
 	endpoints := []string{
-		fmt.Sprintf("http://localhost:%s/d/%s", port, id),
-		fmt.Sprintf("http://localhost:%s/m/%s", port, id),
-		fmt.Sprintf("http://localhost:%s/e/%s", port, id),
+		fmt.Sprintf("http://localhost:%s/d/%s%s", port, id, query),
+		fmt.Sprintf("http://localhost:%s/m/%s%s", port, id, query),
+		fmt.Sprintf("http://localhost:%s/e/%s%s", port, id, query),
 	}
 
 	var resp *http.Response
