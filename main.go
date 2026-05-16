@@ -204,7 +204,14 @@ func mojang(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := "skin:avatar:" + id
+	size := 96
+	if sizeParam := r.URL.Query().Get("size"); sizeParam != "" {
+		if parsedSize, err := strconv.Atoi(sizeParam); err == nil && parsedSize > 0 && parsedSize <= 512 {
+			size = parsedSize
+		}
+	}
+
+	key := fmt.Sprintf("skin:avatar:%s:%d", id, size)
 
 	cached, err := redisClient.Get(ctx, key).Bytes()
 	if err == nil {
@@ -254,7 +261,7 @@ func mojang(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if skin.Textures.Skin.URL != "" {
-		buf, err := render(skin.Textures.Skin.URL)
+		buf, err := render(skin.Textures.Skin.URL, size)
 		if err != nil {
 			http.Error(w, "Failed to render face: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -293,7 +300,14 @@ func drasl(w http.ResponseWriter, r *http.Request) {
 		id[20:32],
 	)
 
-	key := "skin:avatar:" + id
+	size := 96
+	if sizeParam := r.URL.Query().Get("size"); sizeParam != "" {
+		if parsedSize, err := strconv.Atoi(sizeParam); err == nil && parsedSize > 0 && parsedSize <= 512 {
+			size = parsedSize
+		}
+	}
+
+	key := fmt.Sprintf("skin:avatar:%s:%d", id, size)
 
 	cached, err := redisClient.Get(ctx, key).Bytes()
 	if err == nil {
@@ -336,7 +350,7 @@ func drasl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	buf, err := render(profile.SkinURL)
+	buf, err := render(profile.SkinURL, size)
 	if err != nil {
 		http.Error(w, "Failed to render face: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -363,7 +377,14 @@ func ely(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	key := "skin:avatar:" + id
+	size := 96
+	if sizeParam := r.URL.Query().Get("size"); sizeParam != "" {
+		if parsedSize, err := strconv.Atoi(sizeParam); err == nil && parsedSize > 0 && parsedSize <= 512 {
+			size = parsedSize
+		}
+	}
+
+	key := fmt.Sprintf("skin:avatar:%s:%d", id, size)
 
 	cached, err := redisClient.Get(ctx, key).Bytes()
 	if err == nil {
@@ -400,7 +421,7 @@ func ely(w http.ResponseWriter, r *http.Request) {
 
 	username := usernames[len(usernames) - 1].Name
 
-	buf, err := render(fmt.Sprintf("http://skinsystem.ely.by/skins/%s.png", username))
+	buf, err := render(fmt.Sprintf("http://skinsystem.ely.by/skins/%s.png", username), size)
 	if err != nil {
 		http.Error(w, "Failed to render face: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -458,7 +479,7 @@ func all(w http.ResponseWriter, r *http.Request) {
 	w.Write(buffer)
 }
 
-func render(url string) (*bytes.Buffer, error) {
+func render(url string, size int) (*bytes.Buffer, error) {
 	response, err := http.Get(url)
 	if err != nil {
 		return nil, err
@@ -485,7 +506,7 @@ func render(url string) (*bytes.Buffer, error) {
 
 	avatar := skin.RenderFace(img, skin.Options{
 		Overlay: true,
-		Scale: 96,
+		Scale: size,
 	})
 
 	var buf bytes.Buffer
