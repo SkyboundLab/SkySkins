@@ -1,0 +1,20 @@
+version: "1"
+
+processes:
+  postgres:
+    command: "postgres -D $PGDATA -p $PGPORT -k /tmp"
+    readiness_probe:
+      exec:
+        command: "pg_isready -h 127.0.0.1 -p $PGPORT"
+    availability:
+      restart: on_failure
+      max_restarts: 5
+
+  valkey:
+    command: "valkey-server $VALKEY_CONF --port $VALKEY_PORT"
+    readiness_probe:
+      exec:
+        command: "valkey-cli -p $VALKEY_PORT ping"
+    availability:
+      restart: on_failure
+      max_restarts: 5

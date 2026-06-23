@@ -4,11 +4,11 @@ A simple API for rendering avatars from Drasl, Mojang and Ely.
 
 ### Routes
 
-- `/d/{id}` - Fetches a avatar from Drasl
-- `/m/{id}` - Fetches a avatar from Mojang
-- `/e/{id}` - Fetches a avatar from Ely
-- `/a/{id}` - Fetches a avatar from either Drasl, Mojang or Ely
-- `/textures/signed/{id}` - Fetches a signed texture from Drasl, Mojang or Ely
+- `/d/{id}`: Fetches a avatar from Drasl.
+- `/m/{id}`: Fetches a avatar from Mojang.
+- `/e/{id}`: Fetches a avatar from Ely.
+- `/a/{id}`: Fetches a avatar from either Drasl, Mojang or Ely.
+- `/textures/signed/{id}`: Fetches a signed texture from Drasl, Mojang or Ely.
 
 ### Caching
 
@@ -16,15 +16,15 @@ The API caches avatars for 48 hours.
 
 ### Environment Variables
 
-- `PORT` - Port to listen on
+- `PORT`: Port to listen on.
 
-- `MONGODB_URI` - MongoDB URI
+- `DATABASE_URL`: PostgreSQL connection string.
 
-- `REDIS_ADDR` - Redis address
-- `REDIS_PASSWORD` - Redis password
-- `REDIS_DB` - Redis database
+- `REDIS_ADDR`: Redis address.
+- `REDIS_PASSWORD`: Redis password.
+- `REDIS_DB`: Redis database.
 
-- `DRASL_TOKEN` - Drasl authentication token
-- `DRASL_URL` - Drasl API URL
+- `DRASL_TOKEN`: Drasl authentication token.
+- `DRASL_URL`: Drasl API URL.
 
-- `MINESKIN_TOKEN` - MineSkin authentication token
+- `MINESKIN_TOKEN`: MineSkin authentication token.

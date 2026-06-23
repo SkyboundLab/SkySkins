@@ -18,20 +18,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/mux"
-	"github.com/joho/godotenv"
 	"github.com/mineatar-io/skin-render"
 	"github.com/redis/go-redis/v9"
-	"github.com/robfig/cron/v3"
 
-	"go.mongodb.org/mongo-driver/v2/bson"
-	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type MojangProfile struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
 	Properties []struct {
 		Name  string `json:"name"`
 		Value string `json:"value"`
@@ -39,10 +35,10 @@ type MojangProfile struct {
 }
 
 type MojangSkin struct {
-	Timestamp int64 `json:"timestamp"`
-	ProfileID string `json:"profileId"`
+	Timestamp   int64  `json:"timestamp"`
+	ProfileID   string `json:"profileId"`
 	ProfileName string `json:"profileName"`
-	Textures struct {
+	Textures    struct {
 		Skin struct {
 			URL string `json:"url"`
 		} `json:"SKIN"`
@@ -79,14 +75,14 @@ type DraslUser struct {
 }
 
 type DraslSkin struct {
-	ID         string `bson:"id" json:"id"`
-	Name       string `bson:"name" json:"name"`
-	URL        string `bson:"url" json:"url"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	URL        string `json:"url"`
 	Properties []struct {
-		Name      string `bson:"name" json:"name"`
-		Signature string `bson:"signature,omitempty" json:"signature,omitempty"`
-		Value     string `bson:"value" json:"value"`
-	} `bson:"properties" json:"properties"`
+		Name      string `json:"name"`
+		Signature string `json:"signature,omitempty"`
+		Value     string `json:"value"`
+	} `json:"properties"`
 }
 
 type DraslConfig struct {
@@ -95,8 +91,8 @@ type DraslConfig struct {
 }
 
 type ElyUser struct {
-    Name        string `json:"name"`
-    ChangedToAt *int64 `json:"changedToAt,omitempty"`
+	Name        string `json:"name"`
+	ChangedToAt *int64 `json:"changedToAt,omitempty"`
 }
 
 type MineSkin struct {
@@ -111,16 +107,38 @@ type MineSkin struct {
 }
 
 var (
-    ctx = context.Background()
-    redisClient *redis.Client
-	mongoClient *mongo.Client
+	ctx         = context.Background()
+	redisClient *redis.Client
+	db          *pgxpool.Pool
 	draslConfig DraslConfig
-	mineskin string
-	port string
+	mineskin    string
+	port        string
 )
 
+func loadEnv() {
+	data, err := os.ReadFile(".env")
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		if os.Getenv(key) == "" {
+			os.Setenv(key, val)
+		}
+	}
+}
+
 func main() {
-	godotenv.Load()
+	loadEnv()
 
 	port = os.Getenv("PORT")
 	if port == "" {
@@ -135,66 +153,72 @@ func main() {
 	mineskin = os.Getenv("MINESKIN_TOKEN")
 
 	address := os.Getenv("REDIS_ADDR")
-    password := os.Getenv("REDIS_PASSWORD")
-    database, err := strconv.Atoi(os.Getenv("REDIS_DB"))
-    if err != nil {
-        log.Fatalf("Invalid REDIS_DB value: %v", err)
-		os.Exit(1)
-    }
-
-    redisClient = redis.NewClient(&redis.Options{
-        Addr: address,
-        Password: password,
-        DB: database,
-    })
-
-    if err := redisClient.Ping(ctx).Err(); err != nil {
-        log.Fatalf("Failed to connect to Redis: %v", err)
-		os.Exit(1)
-    }
-
-	uri := os.Getenv("MONGODB_URI")
-	if uri == "" {
-		log.Fatal("MONGODB_URI not set")
-		os.Exit(1)
-	}
-
-	mongoClient, err = mongo.Connect(options.Client().ApplyURI(uri))
+	password := os.Getenv("REDIS_PASSWORD")
+	database, err := strconv.Atoi(os.Getenv("REDIS_DB"))
 	if err != nil {
-		log.Fatalf("Failed to connect to MongoDB: %v", err)
+		log.Fatalf("Invalid REDIS_DB value: %v", err)
 		os.Exit(1)
 	}
-	defer func() {
-		if err := mongoClient.Disconnect(context.TODO()); err != nil {
-			panic(err)
-		}
-	}()
 
-	router := mux.NewRouter()
+	redisClient = redis.NewClient(&redis.Options{
+		Addr:     address,
+		Password: password,
+		DB:       database,
+	})
 
-	router.HandleFunc("/d/{id}", drasl)
-	router.HandleFunc("/m/{id}", mojang)
-	router.HandleFunc("/e/{id}", ely)
-	router.HandleFunc("/a/{id}", all)
+	if err := redisClient.Ping(ctx).Err(); err != nil {
+		log.Fatalf("Failed to connect to Redis: %v", err)
+		os.Exit(1)
+	}
 
-	router.HandleFunc("/textures/signed/{id}", textures)
+	uri := os.Getenv("DATABASE_URL")
+	if uri == "" {
+		log.Fatal("DATABASE_URL not set")
+	}
 
-	http.Handle("/", router)
+	db, err = pgxpool.New(ctx, uri)
+	if err != nil {
+		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS drasl (
+			id         TEXT PRIMARY KEY,
+			name       TEXT NOT NULL,
+			url        TEXT NOT NULL,
+			properties JSONB NOT NULL DEFAULT '[]'::jsonb
+		)
+	`)
+	if err != nil {
+		log.Fatalf("Failed to create table: %v", err)
+	}
+
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("GET /d/{id}", drasl)
+	mux.HandleFunc("GET /m/{id}", mojang)
+	mux.HandleFunc("GET /e/{id}", ely)
+	mux.HandleFunc("GET /a/{id}", all)
+
+	mux.HandleFunc("GET /textures/signed/{id}", textures)
 
 	fmt.Printf("Listening on port %s", port)
 
-	c := cron.New()
+	go func() {
+		for {
+			now := time.Now()
+			next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
+			time.Sleep(time.Until(next))
+			updateSkins()
+		}
+	}()
 
-	c.AddFunc("@daily", updateSkins)
-
-	c.Start()
-
-	http.ListenAndServe(":"+port, nil)
+	http.ListenAndServe(":"+port, mux)
 }
 
 func mojang(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-    id := vars["id"]
+	id := r.PathValue("id")
 
 	id = strings.ReplaceAll(id, "-", "")
 
@@ -281,8 +305,7 @@ func mojang(w http.ResponseWriter, r *http.Request) {
 }
 
 func drasl(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-    id := vars["id"]
+	id := r.PathValue("id")
 
 	id = strings.ReplaceAll(id, "-", "")
 
@@ -366,8 +389,7 @@ func drasl(w http.ResponseWriter, r *http.Request) {
 }
 
 func ely(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-    id := vars["id"]
+	id := r.PathValue("id")
 
 	id = strings.ReplaceAll(id, "-", "")
 
@@ -419,7 +441,7 @@ func ely(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	username := usernames[len(usernames) - 1].Name
+	username := usernames[len(usernames)-1].Name
 
 	buf, err := render(fmt.Sprintf("http://skinsystem.ely.by/skins/%s.png", username), size)
 	if err != nil {
@@ -437,8 +459,7 @@ func ely(w http.ResponseWriter, r *http.Request) {
 }
 
 func all(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	id := vars["id"]
+	id := r.PathValue("id")
 
 	size := r.URL.Query().Get("size")
 	query := ""
@@ -512,7 +533,7 @@ func render(url string, size int) (*bytes.Buffer, error) {
 
 	avatar := skin.RenderFace(img, skin.Options{
 		Overlay: true,
-		Scale: size,
+		Scale:   size,
 	})
 
 	var buf bytes.Buffer
@@ -524,22 +545,21 @@ func render(url string, size int) (*bytes.Buffer, error) {
 }
 
 func close(w http.ResponseWriter) {
-    w.WriteHeader(http.StatusNoContent) // 204
-    if hj, ok := w.(http.Hijacker); ok {
-        conn, _, err := hj.Hijack()
-        if err == nil {
-            conn.Close()
-            return
-        }
-    }
-    if fl, ok := w.(http.Flusher); ok {
-        fl.Flush()
-    }
+	w.WriteHeader(http.StatusNoContent) // 204
+	if hj, ok := w.(http.Hijacker); ok {
+		conn, _, err := hj.Hijack()
+		if err == nil {
+			conn.Close()
+			return
+		}
+	}
+	if fl, ok := w.(http.Flusher); ok {
+		fl.Flush()
+	}
 }
 
 func textures(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	id := vars["id"]
+	id := r.PathValue("id")
 
 	id = strings.ReplaceAll(id, "-", "")
 
@@ -559,10 +579,13 @@ func textures(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var result DraslSkin
-	collection := mongoClient.Database("SkySkins").Collection("drasl")
+	var props []byte
 
 	var body []byte
-	err = collection.FindOne(ctx, bson.M{"id": id}).Decode(&result)
+	err = db.QueryRow(ctx, "SELECT id, name, url, properties FROM drasl WHERE id = $1", id).Scan(&result.ID, &result.Name, &result.URL, &props)
+	if err == nil {
+		json.Unmarshal(props, &result.Properties)
+	}
 
 	if err == nil {
 		body, err = json.Marshal(result)
@@ -605,7 +628,7 @@ func textures(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			username := usernames[len(usernames) - 1].Name
+			username := usernames[len(usernames)-1].Name
 
 			response, err = http.Get(fmt.Sprintf("http://skinsystem.ely.by/textures/signed/%s", username))
 			if err != nil {
@@ -671,22 +694,22 @@ func updateSkins() {
 		return
 	}
 
-	collection := mongoClient.Database("SkySkins").Collection("drasl")
-
 	for _, user := range users {
 		log.Printf("Checking %s", user.Name)
 
 		id := strings.ReplaceAll(user.UUID, "-", "")
 
-		var result DraslSkin
-
-		err = collection.FindOne(ctx, bson.M{"id": id}).Decode(&result)
-		if err != nil && err != mongo.ErrNoDocuments {
+		var url string
+		var exists bool
+		err = db.QueryRow(ctx, "SELECT url FROM drasl WHERE id = $1", id).Scan(&url)
+		if err == nil {
+			exists = true
+		} else if err != pgx.ErrNoRows {
 			log.Printf("Warning: DB find error for %s: %v", user.Name, err)
 			continue
 		}
 
-		if err == nil && result.URL == user.SkinURL {
+		if exists && url == user.SkinURL {
 			log.Printf("Skipping %s - URL unchanged", user.Name)
 			continue
 		}
@@ -697,29 +720,21 @@ func updateSkins() {
 			continue
 		}
 
-		doc := bson.M{
-			"id":   id,
-			"name": user.Name,
-			"url":  user.SkinURL,
-			"properties": []bson.M{
-				{
-					"name":      "textures",
-					"value":     value,
-					"signature": signature,
-				},
-				{
-					"name":  "drasl",
-					"value": "we do not want to be drasl!",
-				},
-			},
-		}
+		props, _ := json.Marshal([]map[string]interface{}{
+			{"name": "textures", "value": value, "signature": signature},
+			{"name": "drasl", "value": "we do not want to be drasl!"},
+		})
 
-		if err == mongo.ErrNoDocuments {
-			log.Printf("Inserting %s in DB: %v", user.Name, doc)
-			_, err = collection.InsertOne(ctx, doc)
+		if !exists {
+			_, err = db.Exec(ctx, "INSERT INTO drasl (id, name, url, properties) VALUES ($1, $2, $3, $4)", id, user.Name, user.SkinURL, props)
+			if err == nil {
+				log.Printf("Inserted %s in DB", user.Name)
+			}
 		} else {
-			log.Printf("Updating %s in DB: %v", user.Name, doc)
-			_, err = collection.UpdateOne(ctx, bson.M{"id": id}, bson.M{"$set": doc})
+			_, err = db.Exec(ctx, "UPDATE drasl SET name = $2, url = $3, properties = $4 WHERE id = $1", id, user.Name, user.SkinURL, props)
+			if err == nil {
+				log.Printf("Updated %s in DB", user.Name)
+			}
 		}
 
 		if err != nil {
