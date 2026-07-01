@@ -14,15 +14,33 @@ A simple API for rendering avatars from Drasl, Mojang and Ely.
 
 The API caches avatars for 48 hours.
 
+### Secrets Management
+
+Secrets are resolved in order of precedence:
+
+1. **Environment variables**
+2. **`.env` file**
+3. **[Infisical](https://infisical.com)**
+
+To use Infisical, set the following environment variables:
+
+- `INFISICAL_CLIENT_ID`: Machine Identity client ID.
+- `INFISICAL_CLIENT_SECRET`: Machine Identity client secret.
+- `INFISICAL_PROJECT_ID`: Infisical project ID.
+- `INFISICAL_ENVIRONMENT`: Environment slug (default: `prod`).
+- `INFISICAL_SITE_URL`: Self-hosted URL (default: `https://app.infisical.com`).
+
+When Infisical is configured, the SDK fetches all secrets listed below on startup.
+
 ### Environment Variables
 
-- `PORT`: Port to listen on.
+- `PORT`: Port to listen on (default: `8080`).
 
 - `DATABASE_URL`: PostgreSQL connection string.
 
-- `REDIS_ADDR`: Redis address.
+- `REDIS_ADDR`: Redis address (default: `localhost:6379`).
 - `REDIS_PASSWORD`: Redis password.
-- `REDIS_DB`: Redis database.
+- `REDIS_DB`: Redis database (default: `0`).
 
 - `DRASL_TOKEN`: Drasl authentication token.
 - `DRASL_URL`: Drasl API URL.
