@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	infisical "github.com/infisical/go-sdk"
 	"github.com/mineatar-io/skin-render"
 	"github.com/redis/go-redis/v9"
 
@@ -137,24 +138,75 @@ func loadEnv() {
 	}
 }
 
+func loadSecrets() {
+	clientID := os.Getenv("INFISICAL_CLIENT_ID")
+	clientSecret := os.Getenv("INFISICAL_CLIENT_SECRET")
+	projectID := os.Getenv("INFISICAL_PROJECT_ID")
+	if clientID == "" || clientSecret == "" || projectID == "" {
+		return
+	}
+
+	client := infisical.NewInfisicalClient(ctx, infisical.Config{
+		SiteUrl: getEnv("INFISICAL_SITE_URL", "https://app.infisical.com"),
+	})
+
+	if _, err := client.Auth().UniversalAuthLogin(clientID, clientSecret); err != nil {
+		log.Printf("Warning: Infisical authentication failed: %v", err)
+		return
+	}
+
+	environment := getEnv("INFISICAL_ENVIRONMENT", "prod")
+	secretKeys := []string{
+		"DATABASE_URL",
+		"REDIS_ADDR",
+		"REDIS_PASSWORD",
+		"REDIS_DB",
+		"DRASL_TOKEN",
+		"DRASL_URL",
+		"MINESKIN_TOKEN",
+	}
+
+	for _, key := range secretKeys {
+		if os.Getenv(key) != "" {
+			continue
+		}
+		secret, err := client.Secrets().Retrieve(infisical.RetrieveSecretOptions{
+			SecretKey:   key,
+			Environment: environment,
+			ProjectID:   projectID,
+			SecretPath:  "/",
+		})
+		if err != nil {
+			log.Printf("Warning: failed to fetch secret %s from Infisical: %v", key, err)
+			continue
+		}
+		os.Setenv(key, secret.SecretValue)
+	}
+}
+
+func getEnv(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
 func main() {
 	loadEnv()
+	loadSecrets()
 
-	port = os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
+	port = getEnv("PORT", "8080")
 
 	draslConfig = DraslConfig{
-		Token: os.Getenv("DRASL_TOKEN"),
-		URL:   os.Getenv("DRASL_URL"),
+		Token: getEnv("DRASL_TOKEN", ""),
+		URL:   getEnv("DRASL_URL", ""),
 	}
 
-	mineskin = os.Getenv("MINESKIN_TOKEN")
+	mineskin = getEnv("MINESKIN_TOKEN", "")
 
-	address := os.Getenv("REDIS_ADDR")
-	password := os.Getenv("REDIS_PASSWORD")
-	database, err := strconv.Atoi(os.Getenv("REDIS_DB"))
+	address := getEnv("REDIS_ADDR", "localhost:6379")
+	password := getEnv("REDIS_PASSWORD", "")
+	database, err := strconv.Atoi(getEnv("REDIS_DB", "0"))
 	if err != nil {
 		log.Fatalf("Invalid REDIS_DB value: %v", err)
 		os.Exit(1)
@@ -171,7 +223,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	uri := os.Getenv("DATABASE_URL")
+	uri := getEnv("DATABASE_URL", "")
 	if uri == "" {
 		log.Fatal("DATABASE_URL not set")
 	}
