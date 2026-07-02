@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	infisical "github.com/infisical/go-sdk"
+	infisical "github.com/Twint-Studio/infisical-sdk/go"
 	"github.com/mineatar-io/skin-render"
 	"github.com/redis/go-redis/v9"
 
@@ -146,41 +146,27 @@ func loadSecrets() {
 		return
 	}
 
-	client := infisical.NewInfisicalClient(ctx, infisical.Config{
-		SiteUrl: getEnv("INFISICAL_SITE_URL", "https://app.infisical.com"),
+	sdk := infisical.New(infisical.Options{
+		SiteURL: getEnv("INFISICAL_SITE_URL", "https://app.infisical.com"),
 	})
 
-	if _, err := client.Auth().UniversalAuthLogin(clientID, clientSecret); err != nil {
+	if err := sdk.Login(clientID, clientSecret); err != nil {
 		log.Printf("Warning: Infisical authentication failed: %v", err)
 		return
 	}
 
 	environment := getEnv("INFISICAL_ENVIRONMENT", "prod")
-	secretKeys := []string{
-		"DATABASE_URL",
-		"REDIS_ADDR",
-		"REDIS_PASSWORD",
-		"REDIS_DB",
-		"DRASL_TOKEN",
-		"DRASL_URL",
-		"MINESKIN_TOKEN",
+
+	res, err := sdk.Secrets(environment, projectID)
+	if err != nil {
+		log.Printf("Warning: failed to fetch secrets from Infisical: %v", err)
+		return
 	}
 
-	for _, key := range secretKeys {
-		if os.Getenv(key) != "" {
-			continue
+	for _, s := range res.Secrets {
+		if os.Getenv(s.SecretKey) == "" {
+			os.Setenv(s.SecretKey, s.SecretValue)
 		}
-		secret, err := client.Secrets().Retrieve(infisical.RetrieveSecretOptions{
-			SecretKey:   key,
-			Environment: environment,
-			ProjectID:   projectID,
-			SecretPath:  "/",
-		})
-		if err != nil {
-			log.Printf("Warning: failed to fetch secret %s from Infisical: %v", key, err)
-			continue
-		}
-		os.Setenv(key, secret.SecretValue)
 	}
 }
 
