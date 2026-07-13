@@ -20,8 +20,6 @@ import (
 
 	infisical "github.com/Twint-Studio/infisical-sdk/go"
 	"github.com/mineatar-io/skin-render"
-	"github.com/redis/go-redis/v9"
-
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -109,7 +107,6 @@ type MineSkin struct {
 
 var (
 	ctx         = context.Background()
-	redisClient *redis.Client
 	db          *pgxpool.Pool
 	draslConfig DraslConfig
 	mineskin    string
@@ -190,30 +187,12 @@ func main() {
 
 	mineskin = getEnv("MINESKIN_TOKEN", "")
 
-	address := getEnv("REDIS_ADDR", "localhost:6379")
-	password := getEnv("REDIS_PASSWORD", "")
-	database, err := strconv.Atoi(getEnv("REDIS_DB", "0"))
-	if err != nil {
-		log.Fatalf("Invalid REDIS_DB value: %v", err)
-		os.Exit(1)
-	}
-
-	redisClient = redis.NewClient(&redis.Options{
-		Addr:     address,
-		Password: password,
-		DB:       database,
-	})
-
-	if err := redisClient.Ping(ctx).Err(); err != nil {
-		log.Fatalf("Failed to connect to Redis: %v", err)
-		os.Exit(1)
-	}
-
 	uri := getEnv("DATABASE_URL", "")
 	if uri == "" {
 		log.Fatal("DATABASE_URL not set")
 	}
 
+	var err error
 	db, err = pgxpool.New(ctx, uri)
 	if err != nil {
 		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
@@ -230,6 +209,17 @@ func main() {
 	`)
 	if err != nil {
 		log.Fatalf("Failed to create table: %v", err)
+	}
+
+	_, err = db.Exec(ctx, `
+		CREATE UNLOGGED TABLE IF NOT EXISTS cache (
+			key        TEXT PRIMARY KEY,
+			value      BYTEA NOT NULL,
+			expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '48 hours'
+		)
+	`)
+	if err != nil {
+		log.Fatalf("Failed to create cache table: %v", err)
 	}
 
 	mux := http.NewServeMux()
@@ -249,6 +239,13 @@ func main() {
 			next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, now.Location())
 			time.Sleep(time.Until(next))
 			updateSkins()
+		}
+	}()
+
+	go func() {
+		for {
+			time.Sleep(1 * time.Hour)
+			db.Exec(ctx, "DELETE FROM cache WHERE expires_at < NOW()")
 		}
 	}()
 
@@ -275,7 +272,7 @@ func mojang(w http.ResponseWriter, r *http.Request) {
 
 	key := fmt.Sprintf("skin:avatar:%s:%d", id, size)
 
-	cached, err := redisClient.Get(ctx, key).Bytes()
+	cached, err := cacheGet(key)
 	if err == nil {
 		w.Header().Set("Content-Type", "image/png")
 		w.Write(cached)
@@ -329,7 +326,7 @@ func mojang(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		err = redisClient.Set(ctx, key, buf.Bytes(), 48*time.Hour).Err()
+		err = cacheSet(key, buf.Bytes(), 48*time.Hour)
 		if err != nil {
 			log.Printf("Warning: failed to cache image: %v", err)
 		}
@@ -370,7 +367,7 @@ func drasl(w http.ResponseWriter, r *http.Request) {
 
 	key := fmt.Sprintf("skin:avatar:%s:%d", id, size)
 
-	cached, err := redisClient.Get(ctx, key).Bytes()
+	cached, err := cacheGet(key)
 	if err == nil {
 		w.Header().Set("Content-Type", "image/png")
 		w.Write(cached)
@@ -417,7 +414,7 @@ func drasl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = redisClient.Set(ctx, key, buf.Bytes(), 48*time.Hour).Err()
+	err = cacheSet(key, buf.Bytes(), 48*time.Hour)
 	if err != nil {
 		log.Printf("Warning: failed to cache image: %v", err)
 	}
@@ -446,7 +443,7 @@ func ely(w http.ResponseWriter, r *http.Request) {
 
 	key := fmt.Sprintf("skin:avatar:%s:%d", id, size)
 
-	cached, err := redisClient.Get(ctx, key).Bytes()
+	cached, err := cacheGet(key)
 	if err == nil {
 		w.Header().Set("Content-Type", "image/png")
 		w.Write(cached)
@@ -487,7 +484,7 @@ func ely(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = redisClient.Set(ctx, key, buf.Bytes(), 48*time.Hour).Err()
+	err = cacheSet(key, buf.Bytes(), 48*time.Hour)
 	if err != nil {
 		log.Printf("Warning: failed to cache image: %v", err)
 	}
@@ -582,6 +579,24 @@ func render(url string, size int) (*bytes.Buffer, error) {
 	return &buf, nil
 }
 
+func cacheGet(key string) ([]byte, error) {
+	var value []byte
+	err := db.QueryRow(ctx, "SELECT value FROM cache WHERE key = $1 AND expires_at > NOW()", key).Scan(&value)
+	if err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+func cacheSet(key string, value []byte, ttl time.Duration) error {
+	_, err := db.Exec(ctx, `
+		INSERT INTO cache (key, value, expires_at)
+		VALUES ($1, $2, NOW() + $3::interval)
+		ON CONFLICT (key) DO UPDATE SET value = $2, expires_at = NOW() + $3::interval
+	`, key, value, fmt.Sprintf("%f seconds", ttl.Seconds()))
+	return err
+}
+
 func close(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusNoContent) // 204
 	if hj, ok := w.(http.Hijacker); ok {
@@ -609,7 +624,7 @@ func textures(w http.ResponseWriter, r *http.Request) {
 
 	key := "skin:data:" + id
 
-	cached, err := redisClient.Get(ctx, key).Bytes()
+	cached, err := cacheGet(key)
 	if err == nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(cached)
@@ -688,7 +703,7 @@ func textures(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	err = redisClient.Set(ctx, key, body, 48*time.Hour).Err()
+	err = cacheSet(key, body, 48*time.Hour)
 	if err != nil {
 		log.Printf("Warning: failed to cache skin data for %s: %v", id, err)
 	}

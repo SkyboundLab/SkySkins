@@ -20,17 +20,17 @@ Secrets are resolved in order of precedence:
 
 1. **Environment variables**
 2. **`.env` file**
-3. **[Infisical](https://infisical.com)**  — fetched via `github.com/Twint-Studio/infisical-sdk/go`
+3. **[Infisical](https://infisical.com)**
 
 When Infisical is configured, secrets are fetched on startup.
 
-| Variable | Description |
-|---|---|
-| `INFISICAL_CLIENT_ID` | Machine Identity client ID |
-| `INFISICAL_CLIENT_SECRET` | Machine Identity client secret |
-| `INFISICAL_PROJECT_ID` | Infisical project ID |
-| `INFISICAL_ENVIRONMENT` | Environment slug (default: `prod`) |
-| `INFISICAL_SITE_URL` | Self-hosted URL (default: `https://app.infisical.com`) |
+| Variable | Description | Default |
+|---|---|---|
+| `INFISICAL_CLIENT_ID` | Machine Identity client ID | — |
+| `INFISICAL_CLIENT_SECRET` | Machine Identity client secret | — |
+| `INFISICAL_PROJECT_ID` | Infisical project ID | — |
+| `INFISICAL_ENVIRONMENT` | Environment slug | `prod` |
+| `INFISICAL_SITE_URL` | Self-hosted URL | `https://app.infisical.com` |
 
 ### Environment Variables
 
@@ -38,9 +38,6 @@ When Infisical is configured, secrets are fetched on startup.
 |---|---|---|
 | `PORT` | Port to listen on | `8080` |
 | `DATABASE_URL` | PostgreSQL connection string | — |
-| `REDIS_ADDR` | Redis address | `localhost:6379` |
-| `REDIS_PASSWORD` | Redis password | — |
-| `REDIS_DB` | Redis database | `0` |
 | `DRASL_TOKEN` | Drasl authentication token | — |
 | `DRASL_URL` | Drasl API URL | — |
 | `MINESKIN_TOKEN` | MineSkin authentication token | — |

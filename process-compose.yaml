@@ -9,12 +9,3 @@ processes:
     availability:
       restart: on_failure
       max_restarts: 5
-
-  valkey:
-    command: "valkey-server $VALKEY_CONF --port $VALKEY_PORT"
-    readiness_probe:
-      exec:
-        command: "valkey-cli -p $VALKEY_PORT ping"
-    availability:
-      restart: on_failure
-      max_restarts: 5

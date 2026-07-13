@@ -16,10 +16,6 @@
           PGDATA = "./.nix/postgres";
           PGPORT = "5432";
 
-          VALKEY_CONF = "./.nix/valkey/valkey.conf";
-          VALKEY_DIR = "./.nix/valkey";
-          VALKEY_PORT = "6379";
-
           shellHook = ''
             mkdir -p "$PGDATA" && [ ! -f "$PGDATA/PG_VERSION" ] && initdb -D "$PGDATA" --auth=trust > /dev/null 2>&1
 
@@ -33,14 +29,11 @@
                 pg_ctl -D "$PGDATA" stop > /dev/null 2>&1
               fi
             fi
-
-            mkdir -p "$VALKEY_DIR" && [ ! -f "$VALKEY_CONF" ] && echo 'save ""' | tee -a "$VALKEY_CONF" > /dev/null
           '';
 
           packages = with pkgs; [
             process-compose
             postgresql
-            valkey
             go
           ];
         };
