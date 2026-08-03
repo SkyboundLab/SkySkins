@@ -19,7 +19,7 @@ import (
 	"time"
 
 	infisical "github.com/Twint-Studio/infisical-sdk/go"
-	"github.com/mineatar-io/skin-render"
+	"github.com/SkyboundLab/skin-render"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )

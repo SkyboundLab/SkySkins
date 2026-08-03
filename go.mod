@@ -3,9 +3,9 @@ module skyskins
 go 1.26.3
 
 require (
+	github.com/SkyboundLab/skin-render v0.0.0-20260803234140-77260b5c95c4
 	github.com/Twint-Studio/infisical-sdk/go v1.0.0
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/mineatar-io/skin-render v1.3.1
 )
 
 require (
